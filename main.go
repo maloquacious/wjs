@@ -1,0 +1,140 @@
+// Copyright (c) 2025 Michael D Henderson. All rights reserved.
+
+// Package main implements the WJS script runner
+package main
+
+import (
+	"flag"
+	"fmt"
+	"github.com/maloquacious/semver"
+	"github.com/maloquacious/wjs/lexer"
+	"github.com/maloquacious/wjs/parser"
+	"github.com/maloquacious/wjs/vm"
+	"github.com/maloquacious/wxx"
+	"os"
+	"runtime/debug"
+	"strings"
+)
+
+var (
+	debugMode = false
+	version   = semver.Version{Minor: 1, PreRelease: "alpha", Build: semver.Commit()}
+)
+
+func main() {
+	flag.BoolVar(&debugMode, "debug", debugMode, "enable debugging mode")
+	showBuildInfo := flag.Bool("build-info", false, "show version with commit and exit")
+	showVersion := flag.Bool("version", false, "show version and exit")
+	flag.Parse()
+
+	if showVersion != nil && *showVersion {
+		fmt.Printf("%s\n", version.Short())
+		os.Exit(0)
+	} else if showBuildInfo != nil && *showBuildInfo {
+		fmt.Printf("wjs %s\nwxx  %s\n", version.String(), wxx.Version())
+		os.Exit(0)
+	}
+
+	args := flag.Args()
+
+	if len(args) == 0 {
+		fmt.Println("Usage: wjs [--debug] [--version] <script.wjs>")
+		fmt.Println("   or: wjs [--debug] <WJS statement>")
+		fmt.Println("")
+		fmt.Println("Examples:")
+		fmt.Println("  wjs myscript.wjs")
+		fmt.Println("  wjs 'print(5)'")
+		fmt.Println("  wjs --version")
+		os.Exit(1)
+	}
+
+	input := args[0]
+
+	var filename string // the filename to use for error reporting
+
+	// TODO: users will be using the shebang ("#!") to execute scripts, do we need to do anything special to handle it?
+
+	// if the argument looks like a `.wjs` script name, then try to load the script
+	if strings.HasSuffix(input, ".wjs") {
+		data, err := os.ReadFile(input)
+		if err != nil {
+			fmt.Printf("Error reading file %s: %v\n", input, err)
+			os.Exit(1)
+		}
+		input = string(data)
+		filename = args[0]
+	} else { // Treat as direct statement - join all args
+		input = strings.Join(args, " ")
+	}
+
+	if debugMode {
+		fmt.Printf("Executing: %s\n", input)
+		fmt.Println("---")
+	}
+
+	executeCode(filename, input)
+}
+
+// filename will only be set when running from a script
+func executeCode(filename, input string) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("Error:", r)
+			if debugMode {
+				fmt.Println("--- Stack Trace ---")
+				debug.PrintStack()
+			}
+			os.Exit(1)
+		}
+	}()
+
+	// tokenize the input
+	l := lexer.New(filename, input)
+	tokens := l.AllTokens()
+
+	if debugMode {
+		fmt.Println("Tokens:")
+		for i, tok := range tokens {
+			if tok.Type == lexer.EOF {
+				fmt.Printf("%3d: %s\n", i+1, tok)
+			} else {
+				fmt.Printf("%3d: %s at %d:%d\n", i+1, tok, tok.Pos.Line, tok.Pos.Column)
+			}
+		}
+		fmt.Println("---")
+	}
+
+	p := parser.New(tokens)
+	prog := p.ParseProgram()
+
+	if debugMode {
+		fmt.Printf("AST: %d statements\n", len(prog.Stmts))
+		fmt.Println("---")
+	}
+
+	// TODO: if we're going to check semantics, check them here
+
+	// Create metadata object for VM
+	wjsMeta := vm.Object{
+		"version": version.Short(),
+	}
+	vars := map[string]vm.Value{
+		"_wjs": wjsMeta,
+	}
+
+	svm := vm.New(filename, nil, nil, vars)
+	result, err := svm.Execute(prog)
+	if err != nil {
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
+
+	// Print the final result if there is one
+	if result != nil && debugMode {
+		fmt.Printf("Result: %v\n", result)
+	}
+
+	if debugMode {
+		fmt.Println("Execution completed successfully")
+	}
+}
